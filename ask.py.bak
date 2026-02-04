@@ -9,7 +9,6 @@ import argparse
 import urllib.request
 import urllib.error
 import os
-import re
 from pathlib import Path
 from datetime import datetime
 
@@ -41,7 +40,6 @@ class Colors:
     YELLOW = "\033[93m" if COLORS_ENABLED else ""
     RED = "\033[91m" if COLORS_ENABLED else ""
     DIM = "\033[2m" if COLORS_ENABLED else ""
-    BOLD = "\033[1m" if COLORS_ENABLED else ""
     RESET = "\033[0m" if COLORS_ENABLED else ""
 
 
@@ -74,9 +72,8 @@ class ChatSession:
         if self.num_ctx:
             data["options"] = {"num_ctx": self.num_ctx}
         
-        # Note: Ollama API doesn't standardly support 'think' param in body yet for most models,
-        # but some custom reasoning models might use prompt tokens. 
-        # DeepSeek-R1 style models put thinking in <think> tags naturally.
+        if thinking:
+            data["think"] = True
 
         req = urllib.request.Request(
             url, 
@@ -93,50 +90,29 @@ class ChatSession:
                 if stream:
                     for line in response:
                         if line:
-                            try:
-                                body = json.loads(line.decode('utf-8'))
-                            except json.JSONDecodeError:
-                                continue
-                                
+                            body = json.loads(line.decode('utf-8'))
                             if "message" in body:
                                 content = body["message"].get("content", "")
                                 
-                                # Handle thinking blocks (<think>...</think>)
-                                # We need to handle split tags across chunks too, but simple approach first
-                                
-                                # Check for start tag
+                                # Handle thinking blocks
                                 if "<think>" in content:
                                     in_thinking = True
-                                    parts = content.split("<think>")
-                                    pre_think = parts[0]
-                                    post_think = parts[1]
-                                    
-                                    if pre_think:
-                                        print(pre_think, end="", flush=True)
-                                        full_response += pre_think
-                                    
+                                    content = content.replace("<think>", "")
                                     if COLORS_ENABLED:
                                         print(f"{Colors.DIM}💭 ", end="", flush=True)
-                                    
-                                    content = post_think # Process remainder as thinking
-
-                                # Check for end tag
+                                
                                 if "</think>" in content:
                                     in_thinking = False
                                     parts = content.split("</think>")
-                                    think_part = parts[0]
-                                    rest_part = parts[1] if len(parts) > 1 else ""
-                                    
-                                    thinking_content += think_part
+                                    thinking_content += parts[0]
                                     if COLORS_ENABLED:
-                                        print(f"{think_part}{Colors.RESET}\n", end="", flush=True)
-                                    
-                                    content = rest_part # Process remainder as normal content
+                                        print(f"{Colors.RESET}\n", end="", flush=True)
+                                    content = parts[1] if len(parts) > 1 else ""
                                 
                                 if in_thinking:
                                     thinking_content += content
                                     if COLORS_ENABLED:
-                                        print(content, end="", flush=True)
+                                        print(f"{Colors.DIM}{content}{Colors.RESET}", end="", flush=True)
                                 else:
                                     print(content, end="", flush=True)
                                     full_response += content
@@ -163,9 +139,6 @@ class ChatSession:
         except TimeoutError:
             print(f"\n{Colors.RED}Error: Request timed out{Colors.RESET}")
             return None
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}(Request cancelled){Colors.RESET}")
-            return None
 
 
 def list_models():
@@ -180,25 +153,12 @@ def list_models():
                 return
             
             print(f"{Colors.CYAN}Available models:{Colors.RESET}\n")
-            # Sort models by name
-            models.sort(key=lambda x: x['name'])
-            
             for m in models:
                 name = m["name"]
-                size_gb = m.get("size", 0) / (1024**3)
+                size = m.get("size", 0) / (1024**3)  # Convert to GB
                 modified = m.get("modified_at", "")[:10]
-                
-                # Check if it matches default
-                is_default = name == DEFAULT_MODEL or name.split(":")[0] == DEFAULT_MODEL.split(":")[0]
-                marker = f" {Colors.YELLOW}(default){Colors.RESET}" if is_default else ""
-                
-                # Colorize size
-                size_color = Colors.DIM
-                if size_gb > 10: size_color = Colors.RED
-                elif size_gb > 5: size_color = Colors.YELLOW
-                elif size_gb < 1: size_color = Colors.GREEN
-                
-                print(f"  {Colors.BOLD}{name:<30}{Colors.RESET} {size_color}{size_gb:>5.1f}GB{Colors.RESET}  {Colors.DIM}{modified}{Colors.RESET}{marker}")
+                marker = " (default)" if name.split(":")[0] == DEFAULT_MODEL.split(":")[0] else ""
+                print(f"  {Colors.GREEN}{name}{Colors.RESET} ({size:.1f}GB, {modified}){Colors.YELLOW}{marker}{Colors.RESET}")
     except Exception as e:
         print(f"{Colors.RED}Error listing models: {e}{Colors.RESET}")
 
@@ -208,9 +168,7 @@ def save_session(session, name=None):
     HISTORY_DIR.mkdir(exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Sanitize name
-    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name) if name else timestamp
-    filename = f"{safe_name}.json"
+    filename = f"{name or timestamp}.json"
     
     with open(HISTORY_DIR / filename, "w") as f:
         json.dump({
@@ -222,7 +180,7 @@ def save_session(session, name=None):
     print(f"{Colors.DIM}Session saved to {filename}{Colors.RESET}")
     
     # Cleanup old sessions
-    sessions = sorted(HISTORY_DIR.glob("*.json"), key=os.path.getmtime)
+    sessions = sorted(HISTORY_DIR.glob("*.json"))
     if len(sessions) > MAX_HISTORY_SESSIONS:
         for old in sessions[:-MAX_HISTORY_SESSIONS]:
             old.unlink()
@@ -232,10 +190,10 @@ def load_session(name):
     """Load a previous conversation"""
     path = HISTORY_DIR / f"{name}.json"
     if not path.exists():
-        # Try partial match (most recent first)
-        matches = sorted(HISTORY_DIR.glob(f"*{name}*.json"), key=os.path.getmtime, reverse=True)
+        # Try partial match
+        matches = list(HISTORY_DIR.glob(f"*{name}*.json"))
         if matches:
-            path = matches[0]
+            path = matches[-1]  # Most recent match
         else:
             print(f"{Colors.RED}Session '{name}' not found{Colors.RESET}")
             return None
@@ -246,44 +204,28 @@ def load_session(name):
     session = ChatSession(data["model"])
     session.messages = data["messages"]
     print(f"{Colors.GREEN}Loaded session from {path.name} ({len(session.messages)} messages){Colors.RESET}")
-    
-    # Replay last few messages context
-    print(f"{Colors.DIM}Last context:{Colors.RESET}")
-    for msg in session.messages[-2:]:
-        role = msg["role"]
-        content = msg["content"][:100].replace("\n", " ") + "..."
-        print(f"  {Colors.BOLD}{role}:{Colors.RESET} {content}")
-    print("-" * 50)
-        
     return session
 
 
 def interactive_mode(model, system_prompt, json_mode, thinking=False, load_from=None):
-    # Banner
-    print(f"{Colors.CYAN}🤖 Interactive Chat with {Colors.BOLD}{model}{Colors.RESET}")
-    print(f"{Colors.DIM}Type 'help' for commands, 'quit' to exit.{Colors.RESET}")
-    
+    print(f"{Colors.CYAN}🤖 Interactive Chat with {model}{Colors.RESET}")
+    print("Commands: exit/quit, clear, save [name], load <name>, models, help")
     if json_mode:
         print(f"{Colors.YELLOW}📋 JSON mode enabled{Colors.RESET}")
     if thinking:
         print(f"{Colors.YELLOW}💭 Thinking mode enabled{Colors.RESET}")
     print("-" * 50)
 
-    session = None
     if load_from:
         session = load_session(load_from)
-    
-    if not session:
+        if not session:
+            session = ChatSession(model, system_prompt)
+    else:
         session = ChatSession(model, system_prompt)
 
     while True:
         try:
-            # Fancy prompt
-            prompt_str = f"{Colors.GREEN}>>> {Colors.RESET}"
-            if load_from:
-                prompt_str = f"{Colors.GREEN}[{load_from}] >>> {Colors.RESET}"
-                
-            user_input = input(prompt_str)
+            user_input = input(f"{Colors.GREEN}>>> {Colors.RESET}")
             cmd = user_input.lower().strip()
             
             if cmd in ('exit', 'quit', 'q'):
@@ -294,33 +236,17 @@ def interactive_mode(model, system_prompt, json_mode, thinking=False, load_from=
                 continue
             if cmd.startswith('save'):
                 parts = cmd.split(maxsplit=1)
-                name = parts[1] if len(parts) > 1 else None
-                save_session(session, name)
-                if name: load_from = name # Switch context to saved name
+                save_session(session, parts[1] if len(parts) > 1 else None)
                 continue
             if cmd.startswith('load '):
                 name = cmd.split(maxsplit=1)[1]
                 loaded = load_session(name)
                 if loaded:
                     session = loaded
-                    load_from = name
                 continue
             if cmd == 'models':
                 list_models()
                 continue
-            if cmd.startswith('model '):
-                new_model = cmd.split(maxsplit=1)[1]
-                session.model = new_model
-                model = new_model
-                print(f"{Colors.YELLOW}Switched to model: {model}{Colors.RESET}")
-                continue
-            if cmd == 'history':
-                print(f"{Colors.CYAN}Saved sessions:{Colors.RESET}")
-                sessions = sorted(HISTORY_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
-                for s in sessions[:10]:
-                    print(f"  {s.stem} ({datetime.fromtimestamp(s.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})")
-                continue
-                
             if cmd == 'help':
                 print(f"""
 {Colors.CYAN}Commands:{Colors.RESET}
@@ -328,9 +254,7 @@ def interactive_mode(model, system_prompt, json_mode, thinking=False, load_from=
   clear             Clear conversation history
   save [name]       Save session to file
   load <name>       Load a previous session
-  history           List recent saved sessions
   models            List available models
-  model <name>      Switch model
   help              Show this help
 
 {Colors.CYAN}Tips:{Colors.RESET}
@@ -342,10 +266,6 @@ def interactive_mode(model, system_prompt, json_mode, thinking=False, load_from=
             
             if not user_input.strip():
                 continue
-            
-            # Allow multiline input if ends with \
-            while user_input.strip().endswith('\\'):
-                user_input = user_input.rstrip('\\') + "\n" + input(f"{Colors.GREEN}... {Colors.RESET}")
 
             session.add_user_message(user_input)
             session.chat(stream=True, json_mode=json_mode, thinking=thinking)
@@ -375,7 +295,7 @@ Examples:
     parser.add_argument("prompt", nargs="*", help="The prompt to send (if empty, enters interactive mode)")
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("-s", "--system", help="System prompt")
-    parser.add_argument("-t", "--think", action="store_true", help="Enable thinking/reasoning mode (DeepSeek style)")
+    parser.add_argument("-t", "--think", action="store_true", help="Enable thinking/reasoning mode")
     parser.add_argument("--no-stream", action="store_false", dest="stream", help="Disable streaming output")
     parser.add_argument("--json", action="store_true", help="Force JSON output format")
     parser.add_argument("--ctx", type=int, help="Context window size (num_ctx)")
@@ -392,10 +312,7 @@ Examples:
     # Handle piped input
     stdin_input = ""
     if not sys.stdin.isatty():
-        try:
-            stdin_input = sys.stdin.read().strip()
-        except Exception:
-            pass
+        stdin_input = sys.stdin.read().strip()
 
     # Determine mode
     prompt_text = " ".join(args.prompt)
