@@ -1,9 +1,8 @@
 use clap::Parser;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
 #[derive(Parser, Debug)]
 #[command(name = "ask")]
@@ -77,9 +76,9 @@ fn get_default_model() -> String {
     env::var("ASK_MODEL").unwrap_or_else(|_| "gpt-oss:latest".to_string())
 }
 
-fn list_models(client: &Client, host: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn list_models(host: &str) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/api/tags", host);
-    let resp: ModelsResponse = client.get(&url).send()?.json()?;
+    let resp: ModelsResponse = ureq::get(&url).call()?.into_json()?;
     
     println!("Available models:\n");
     let mut models = resp.models;
@@ -93,7 +92,6 @@ fn list_models(client: &Client, host: &str) -> Result<(), Box<dyn std::error::Er
 }
 
 fn ask(
-    client: &Client,
     host: &str,
     model: &str,
     prompt: &str,
@@ -121,18 +119,36 @@ fn ask(
         format: if json_mode { Some("json".to_string()) } else { None },
     };
 
-    let resp: ChatResponse = client
-        .post(&url)
-        .json(&request)
-        .timeout(std::time::Duration::from_secs(300))
-        .send()?
-        .json()?;
+    let resp: ChatResponse = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_json(&request)?
+        .into_json()?;
 
     Ok(resp.message.content)
 }
 
+fn is_stdin_piped() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::isatty(io::stdin().as_raw_fd()) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::GetConsoleMode;
+        let handle = io::stdin().as_raw_handle();
+        let mut mode = 0;
+        unsafe { GetConsoleMode(handle as _, &mut mode) == 0 }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 fn read_stdin() -> Option<String> {
-    if atty::is(atty::Stream::Stdin) {
+    if !is_stdin_piped() {
         return None;
     }
     let mut buffer = String::new();
@@ -155,7 +171,6 @@ fn main() {
         return;
     }
 
-    let client = Client::new();
     let host = get_ollama_host();
     let model = if args.model == "gpt-oss:latest" {
         get_default_model()
@@ -164,7 +179,7 @@ fn main() {
     };
 
     if args.list_models {
-        if let Err(e) = list_models(&client, &host) {
+        if let Err(e) = list_models(&host) {
             eprintln!("Error listing models: {}", e);
             std::process::exit(1);
         }
@@ -187,7 +202,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    match ask(&client, &host, &model, &prompt, args.system.as_deref(), args.json) {
+    match ask(&host, &model, &prompt, args.system.as_deref(), args.json) {
         Ok(response) => {
             if let Some(output_file) = args.output {
                 if let Err(e) = fs::write(&output_file, &response) {
