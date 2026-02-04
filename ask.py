@@ -12,6 +12,11 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+# Fix Windows console encoding for emoji/unicode
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Try readline for better input (Unix) or pyreadline3 (Windows)
 try:
     import readline
