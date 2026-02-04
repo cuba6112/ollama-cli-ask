@@ -15,8 +15,14 @@ from datetime import datetime
 
 # Fix Windows console encoding for emoji/unicode
 if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    import io
+    # Force UTF-8 for piped output on Windows
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    else:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Try readline for better input (Unix) or pyreadline3 (Windows)
 try:
@@ -46,10 +52,11 @@ class Colors:
 
 
 class ChatSession:
-    def __init__(self, model, system_prompt=None, num_ctx=None):
+    def __init__(self, model, system_prompt=None, num_ctx=None, temperature=None):
         self.model = model
         self.messages = []
         self.num_ctx = num_ctx
+        self.temperature = temperature
         self.total_tokens = 0
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -71,8 +78,13 @@ class ChatSession:
         if json_mode:
             data["format"] = "json"
         
+        options = {}
         if self.num_ctx:
-            data["options"] = {"num_ctx": self.num_ctx}
+            options["num_ctx"] = self.num_ctx
+        if self.temperature is not None:
+            options["temperature"] = self.temperature
+        if options:
+            data["options"] = options
         
         # Note: Ollama API doesn't standardly support 'think' param in body yet for most models,
         # but some custom reasoning models might use prompt tokens. 
@@ -379,10 +391,20 @@ Examples:
     parser.add_argument("--no-stream", action="store_false", dest="stream", help="Disable streaming output")
     parser.add_argument("--json", action="store_true", help="Force JSON output format")
     parser.add_argument("--ctx", type=int, help="Context window size (num_ctx)")
+    parser.add_argument("--temp", type=float, help="Temperature (0.0-2.0, default varies by model)")
     parser.add_argument("--load", metavar="NAME", help="Load a previous session")
     parser.add_argument("--list-models", action="store_true", help="List available models")
+    parser.add_argument("-v", "--version", action="store_true", help="Show version info")
+    parser.add_argument("--debug", action="store_true", help="Show debug info on errors")
     
     args = parser.parse_args()
+
+    # Handle --version
+    if args.version:
+        print(f"ask v1.1.0 - Ollama CLI")
+        print(f"Host: {OLLAMA_HOST}")
+        print(f"Default model: {DEFAULT_MODEL}")
+        sys.exit(0)
 
     # Handle --list-models
     if args.list_models:
@@ -414,7 +436,7 @@ Examples:
             final_content += "\n\nContext:\n"
         final_content += stdin_input
 
-    session = ChatSession(args.model, args.system, args.ctx)
+    session = ChatSession(args.model, args.system, args.ctx, args.temp)
     session.add_user_message(final_content)
     result = session.chat(stream=args.stream, json_mode=args.json, thinking=args.think)
     
