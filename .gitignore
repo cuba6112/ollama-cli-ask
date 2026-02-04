@@ -1,0 +1,7 @@
+# Rust build artifacts
+ask-rs/target/
+
+# Keep the source
+!ask-rs/src/
+!ask-rs/Cargo.toml
+!ask-rs/Cargo.lock
