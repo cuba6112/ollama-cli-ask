@@ -10,18 +10,33 @@ import urllib.request
 import urllib.error
 import os
 import re
+import io
 from pathlib import Path
 from datetime import datetime
 
+# Agent mode: strip emoji/unicode for clean piped output
+AGENT_MODE = os.getenv("ASK_AGENT_MODE", "").lower() in ("1", "true", "yes") or not sys.stdout.isatty()
+
 # Fix Windows console encoding for emoji/unicode
 if sys.platform == 'win32':
-    import io
-    # Force UTF-8 for piped output on Windows
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    else:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    # Force UTF-8 with replace for piped output on Windows
+    try:
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', newline='')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', newline='')
+    except Exception:
+        pass  # Fallback to default encoding
+
+def safe_print(text, end='\n', flush=False):
+    """Print with encoding safety for agents/piped output"""
+    if AGENT_MODE:
+        # Strip emoji and problematic unicode for agent consumption
+        text = text.encode('ascii', errors='ignore').decode('ascii')
+    try:
+        print(text, end=end, flush=flush)
+    except UnicodeEncodeError:
+        # Last resort: strip to ASCII
+        print(text.encode('ascii', errors='ignore').decode('ascii'), end=end, flush=flush)
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Try readline for better input (Unix) or pyreadline3 (Windows)
@@ -124,11 +139,11 @@ class ChatSession:
                                     post_think = parts[1]
                                     
                                     if pre_think:
-                                        print(pre_think, end="", flush=True)
+                                        safe_print(pre_think, end="", flush=True)
                                         full_response += pre_think
                                     
-                                    if COLORS_ENABLED:
-                                        print(f"{Colors.DIM}💭 ", end="", flush=True)
+                                    if COLORS_ENABLED and not AGENT_MODE:
+                                        safe_print(f"{Colors.DIM}[thinking] ", end="", flush=True)
                                     
                                     content = post_think # Process remainder as thinking
 
@@ -140,17 +155,17 @@ class ChatSession:
                                     rest_part = parts[1] if len(parts) > 1 else ""
                                     
                                     thinking_content += think_part
-                                    if COLORS_ENABLED:
-                                        print(f"{think_part}{Colors.RESET}\n", end="", flush=True)
+                                    if COLORS_ENABLED and not AGENT_MODE:
+                                        safe_print(f"{think_part}{Colors.RESET}\n", end="", flush=True)
                                     
                                     content = rest_part # Process remainder as normal content
                                 
                                 if in_thinking:
                                     thinking_content += content
-                                    if COLORS_ENABLED:
-                                        print(content, end="", flush=True)
+                                    if COLORS_ENABLED and not AGENT_MODE:
+                                        safe_print(content, end="", flush=True)
                                 else:
-                                    print(content, end="", flush=True)
+                                    safe_print(content, end="", flush=True)
                                     full_response += content
                                     
                             if body.get("done", False):
@@ -158,25 +173,25 @@ class ChatSession:
                                 if "eval_count" in body:
                                     self.total_tokens += body.get("eval_count", 0)
                                 break
-                    print()  # Newline at end
+                    safe_print("")  # Newline at end
                 else:
                     body = json.loads(response.read().decode('utf-8'))
                     full_response = body["message"]["content"]
-                    print(full_response)
+                    safe_print(full_response)
             
             self.add_assistant_message(full_response)
             return full_response
                 
         except urllib.error.URLError as e:
-            print(f"\n{Colors.RED}Error: Could not connect to Ollama at {OLLAMA_HOST}{Colors.RESET}")
-            print(f"Details: {e}")
-            print(f"\n{Colors.YELLOW}Tip: Is Ollama running? Try: ollama serve{Colors.RESET}")
+            safe_print(f"\nError: Could not connect to Ollama at {OLLAMA_HOST}")
+            safe_print(f"Details: {e}")
+            safe_print(f"\nTip: Is Ollama running? Try: ollama serve")
             return None
         except TimeoutError:
-            print(f"\n{Colors.RED}Error: Request timed out{Colors.RESET}")
+            safe_print(f"\nError: Request timed out")
             return None
         except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}(Request cancelled){Colors.RESET}")
+            safe_print(f"\n(Request cancelled)")
             return None
 
 
@@ -188,10 +203,13 @@ def list_models():
             data = json.loads(response.read().decode('utf-8'))
             models = data.get("models", [])
             if not models:
-                print("No models found. Pull one with: ollama pull <model>")
+                safe_print("No models found. Pull one with: ollama pull <model>")
                 return
             
-            print(f"{Colors.CYAN}Available models:{Colors.RESET}\n")
+            if not AGENT_MODE:
+                safe_print(f"{Colors.CYAN}Available models:{Colors.RESET}\n")
+            else:
+                safe_print("Available models:\n")
             # Sort models by name
             models.sort(key=lambda x: x['name'])
             
@@ -202,17 +220,21 @@ def list_models():
                 
                 # Check if it matches default
                 is_default = name == DEFAULT_MODEL or name.split(":")[0] == DEFAULT_MODEL.split(":")[0]
-                marker = f" {Colors.YELLOW}(default){Colors.RESET}" if is_default else ""
                 
-                # Colorize size
-                size_color = Colors.DIM
-                if size_gb > 10: size_color = Colors.RED
-                elif size_gb > 5: size_color = Colors.YELLOW
-                elif size_gb < 1: size_color = Colors.GREEN
-                
-                print(f"  {Colors.BOLD}{name:<30}{Colors.RESET} {size_color}{size_gb:>5.1f}GB{Colors.RESET}  {Colors.DIM}{modified}{Colors.RESET}{marker}")
+                if AGENT_MODE:
+                    # Plain output for agents
+                    marker = " (default)" if is_default else ""
+                    safe_print(f"  {name:<30} {size_gb:>5.1f}GB  {modified}{marker}")
+                else:
+                    marker = f" {Colors.YELLOW}(default){Colors.RESET}" if is_default else ""
+                    # Colorize size
+                    size_color = Colors.DIM
+                    if size_gb > 10: size_color = Colors.RED
+                    elif size_gb > 5: size_color = Colors.YELLOW
+                    elif size_gb < 1: size_color = Colors.GREEN
+                    safe_print(f"  {Colors.BOLD}{name:<30}{Colors.RESET} {size_color}{size_gb:>5.1f}GB{Colors.RESET}  {Colors.DIM}{modified}{Colors.RESET}{marker}")
     except Exception as e:
-        print(f"{Colors.RED}Error listing models: {e}{Colors.RESET}")
+        safe_print(f"Error listing models: {e}")
 
 
 def save_session(session, name=None):
@@ -394,6 +416,7 @@ Examples:
     parser.add_argument("--temp", type=float, help="Temperature (0.0-2.0, default varies by model)")
     parser.add_argument("--load", metavar="NAME", help="Load a previous session")
     parser.add_argument("--list-models", action="store_true", help="List available models")
+    parser.add_argument("-o", "--output", metavar="FILE", help="Write output to file (bypasses stdout encoding)")
     parser.add_argument("-v", "--version", action="store_true", help="Show version info")
     parser.add_argument("--debug", action="store_true", help="Show debug info on errors")
     
@@ -438,11 +461,26 @@ Examples:
 
     session = ChatSession(args.model, args.system, args.ctx, args.temp)
     session.add_user_message(final_content)
-    result = session.chat(stream=args.stream, json_mode=args.json, thinking=args.think)
+    
+    # If output file specified, capture result and write to file
+    if args.output:
+        # Use non-streaming for file output
+        result = session.chat(stream=False, json_mode=args.json, thinking=args.think)
+        if result:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(result)
+            safe_print(f"Output written to {args.output}")
+    else:
+        result = session.chat(stream=args.stream, json_mode=args.json, thinking=args.think)
     
     if result is None:
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Catch-all for encoding errors and other issues
+        sys.stderr.write(f"Error: {str(e).encode('ascii', errors='replace').decode('ascii')}\n")
+        sys.exit(1)
